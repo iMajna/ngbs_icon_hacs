@@ -30,6 +30,12 @@ except ImportError:  # pragma: no cover - standalone script fallback
 
 _LOGGER = logging.getLogger(__name__)
 
+# The controller only serves a single Modbus-TCP connection and occasionally
+# refuses or ignores a connect right after the previous one was closed, so a
+# failed connect is retried a couple of times (with these back-off delays, in
+# seconds) before the whole read cycle is given up on.
+CONNECT_RETRY_DELAYS = (1.0, 2.0)
+
 
 class IconModbusError(Exception):
     """Base exception for the iCON Modbus client."""
@@ -166,18 +172,31 @@ class IconModbusClient:
     async def async_connect(self) -> None:
         """Open the connection if not already open (idempotent)."""
         if self._client is None:
+            # reconnect_delay=0 disables pymodbus' background auto-reconnect:
+            # connections are opened and closed explicitly here, and a
+            # reconnect loop left running after the controller drops a socket
+            # would silently hold the controller's only Modbus connection.
             self._client = AsyncModbusTcpClient(
-                self._host, port=self._port, timeout=self._timeout
+                self._host,
+                port=self._port,
+                timeout=self._timeout,
+                reconnect_delay=0,
             )
-        if not self._client.connected:
+        if self._client.connected:
+            return
+        for delay in (*CONNECT_RETRY_DELAYS, None):
             _LOGGER.debug("Connecting to iCON Modbus at %s:%s", self._host, self._port)
-            connected = await self._client.connect()
-            if not connected:
-                # pymodbus' connect() only returns False, so probe the socket
-                # ourselves to turn that into an actionable reason.
-                raise IconModbusConnectionError(
-                    f"{self._host}:{self._port} - {await self._async_probe_reason()}"
-                )
+            if await self._client.connect():
+                return
+            if delay is None:
+                break
+            _LOGGER.debug("Connect to iCON failed, retrying in %gs", delay)
+            await asyncio.sleep(delay)
+        # pymodbus' connect() only returns False, so probe the socket
+        # ourselves to turn that into an actionable reason.
+        raise IconModbusConnectionError(
+            f"{self._host}:{self._port} - {await self._async_probe_reason()}"
+        )
 
     async def _async_probe_reason(self) -> str:
         """Return a human-readable reason the Modbus port could not be opened."""
@@ -203,8 +222,9 @@ class IconModbusClient:
         except OSError:  # pragma: no cover - close-time errors are not useful here
             pass
         return (
-            "the port accepts connections but the Modbus handshake failed - another "
-            "client may be holding the controller's single Modbus connection"
+            "repeated connection attempts failed, but the port is reachable now - "
+            "another client may have been holding the controller's single Modbus "
+            "connection"
         )
 
     async def async_close(self) -> None:
