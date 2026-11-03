@@ -32,8 +32,20 @@ OFF_NOCONN = 0x0008  # No thermostat connection / not configured, bit=1
 OFF_DI = 0x000B  # Digital inputs / system bits
 OFF_LIVE = 0x000E  # Thermostat connection alive, bit=1
 OFF_COND = 0x0002  # Condensation warning, bit=1 cooling blocked in that zone
+OFF_SIGNAL = 0x000C  # System signal bits, see SIGNAL_BITS
+OFF_TPR = 0x000D  # Timer/schedule active, bit=1
+OFF_FORCED = 0x000F  # Forced relay state (option), same bit layout as Relay
 
 DI_PUMP_BIT = 8  # Di register: pump active (any A or B loop)
+
+# Signal register: canonical "system" key -> bit number.
+SIGNAL_BITS = {
+    "overheating": 1,
+    "frost_danger": 2,
+    "outdoor_sensor_fault": 3,
+    "water_sensor_fault": 4,
+    "bms_fault": 6,
+}
 
 # Analog registers
 OFF_AO = 0x0010  # Mixing valve output, 0..1000 = 0..10V
@@ -54,6 +66,7 @@ OFF_SETPOINT = 0x0031  # x0.1 C; thermostat t (1..8) -> OFF_SETPOINT + (t-1)*4
 # System state
 OFF_HCMODE = 0x0051  # 0=heat, 1=cool, >1 switchover in progress
 OFF_TEX = 0x0052  # effective outdoor temperature, x0.1 C
+OFF_XAW = 0x0053  # mixing valve calculated setpoint, x0.1 C
 OFF_PRGVER = 0x0054  # firmware version, 0 on unreachable slave -> used for discovery
 
 # Single read window that covers everything above (offset 0x00..0x57 inclusive)
@@ -68,6 +81,11 @@ READ_COUNT = 0x0058  # 88 registers, < 125 (FC3 limit)
 # the bulk read window above, so it needs its own read per device.
 OFF_EFFOUT = 0x00F0  # EffOut.0..9
 EFFOUT_READ_COUNT = 10
+
+# Windows of the read-only raw dump used by the diagnostics download.
+RAW_STANDARD_COUNT = 0x0100
+RAW_EXTENDED_COUNT = 0x0028
+RAW_CHUNK = 100
 
 # --- Extended function registers (absolute addresses, no device offset) -----
 

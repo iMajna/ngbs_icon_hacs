@@ -13,6 +13,7 @@ from homeassistant.const import (
     EntityCategory,
     UnitOfElectricPotential,
     UnitOfTemperature,
+    UnitOfTime,
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -55,6 +56,13 @@ SYSTEM_SENSORS: tuple[SensorEntityDescription, ...] = (
     SensorEntityDescription(
         key="outdoor_temp",
         name="Outdoor temperature",
+        device_class=SensorDeviceClass.TEMPERATURE,
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        state_class=SensorStateClass.MEASUREMENT,
+    ),
+    SensorEntityDescription(
+        key="mixing_setpoint",
+        name="Mixing valve setpoint",
         device_class=SensorDeviceClass.TEMPERATURE,
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         state_class=SensorStateClass.MEASUREMENT,
@@ -103,6 +111,25 @@ SYSTEM_SENSORS: tuple[SensorEntityDescription, ...] = (
 )
 
 
+# Read over JSON, so they can be unknown until the first successful read. These
+# are created regardless, unlike SYSTEM_SENSORS.
+SETTINGS_SENSORS: tuple[SensorEntityDescription, ...] = (
+    SensorEntityDescription(
+        key="hysteresis",
+        name="Thermostat hysteresis",
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    SensorEntityDescription(
+        key="uptime_hours",
+        name="Uptime",
+        device_class=SensorDeviceClass.DURATION,
+        native_unit_of_measurement=UnitOfTime.HOURS,
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+)
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: IconConfigEntry,
@@ -127,6 +154,9 @@ async def async_setup_entry(
         IconSystemSensor(coordinator, master_icon, desc)
         for desc in SYSTEM_SENSORS
         if data["system"].get(desc.key) is not None
+    )
+    entities.extend(
+        IconSystemSensor(coordinator, master_icon, desc) for desc in SETTINGS_SENSORS
     )
 
     async_add_entities(entities)

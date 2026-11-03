@@ -2,16 +2,24 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
     BinarySensorEntity,
     BinarySensorEntityDescription,
 )
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .coordinator import IconConfigEntry, IconDataUpdateCoordinator
 from .entity import IconIconEntity, IconThermostatEntity
+from .modbus_registers import SIGNAL_BITS
+
+# Flags that turn the Problem sensor on. The sensor-fault flags are attributes
+# only: they stay on for good on systems without those optional sensors.
+PROBLEM_FLAGS = ("overheating", "frost_danger", "bms_fault")
 
 THERMOSTAT_BINARY_SENSORS: tuple[BinarySensorEntityDescription, ...] = (
     BinarySensorEntityDescription(
@@ -70,6 +78,7 @@ async def async_setup_entry(
 
     if data["system"].get("pump") is not None:
         entities.append(IconPumpBinarySensor(coordinator, master_icon))
+    entities.append(IconProblemBinarySensor(coordinator, master_icon))
 
     async_add_entities(entities)
 
@@ -117,6 +126,40 @@ class IconThermostatBinarySensor(IconThermostatEntity, BinarySensorEntity):
         if self._thermostat is None:
             return None
         return self._thermostat[self.entity_description.key]
+
+
+class IconProblemBinarySensor(IconIconEntity, BinarySensorEntity):
+    """Whether the controller reports a fault that needs attention."""
+
+    _attr_name = "Problem"
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self, coordinator: IconDataUpdateCoordinator, icon_key: str
+    ) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator, icon_key)
+        self._attr_unique_id = f"{coordinator.sysid}_problem"
+
+    @property
+    def is_on(self) -> bool:
+        """Return True when a fault flag is set."""
+        system = self.coordinator.data["system"]
+        return any(system.get(flag) for flag in PROBLEM_FLAGS)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return every flag and any relay outputs forced on."""
+        system = self.coordinator.data["system"]
+        return {
+            **{flag: system.get(flag) for flag in SIGNAL_BITS},
+            "forced_relays": {
+                icon_key: icon["forced_relays"]
+                for icon_key, icon in self.coordinator.data["icons"].items()
+                if icon["forced_relays"]
+            },
+        }
 
 
 class IconRelayBinarySensor(IconIconEntity, BinarySensorEntity):

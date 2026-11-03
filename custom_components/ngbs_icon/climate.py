@@ -83,6 +83,22 @@ class IconClimate(IconThermostatEntity, ClimateEntity):
         return self._thermostat["target"] if self._thermostat else None
 
     @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Return what explains this thermostat's demand."""
+        thermostat = self._thermostat
+        if thermostat is None:
+            return None
+        return {
+            "demand_off_temperature": thermostat.get("demand_off_temp"),
+            "second_loop_offset": thermostat.get(
+                "second_loop_cooling_offset"
+                if self._is_cooling
+                else "second_loop_heating_offset"
+            ),
+            "time_program": thermostat.get("program_active"),
+        }
+
+    @property
     def hvac_mode(self) -> HVACMode:
         """Return the current HVAC mode."""
         return HVACMode.COOL if self._is_cooling else HVACMode.HEAT

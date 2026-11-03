@@ -146,6 +146,13 @@ class IconJsonClient:
         """Fetch the full raw state with a single ``RELOAD`` command."""
         return await self._async_request({"RELOAD": ""})
 
+    async def async_get_settings(self) -> dict[str, Any]:
+        """Fetch the raw dataset, asking for the config section if it is missing."""
+        raw = await self.async_get_raw()
+        if "THH" not in (raw.get("CFG") or {}):
+            raw = await self._async_request({"RELOAD": 3})
+        return raw
+
     async def async_fetch_inventory(self) -> dict[str, Any]:
         """Fetch the naming inventory used to label Modbus entities.
 
@@ -195,6 +202,34 @@ def extract_inventory(raw: dict[str, Any]) -> dict[str, Any]:
         "thermostats": thermostats,
         "relays": relays,
         "hcmaster": hcmaster,
+    }
+
+
+def _number(value: Any) -> float | None:
+    """Return a JSON value as a float, or None if it is not numeric."""
+    return round(float(value), 2) if isinstance(value, (int, float)) else None
+
+
+def extract_settings(raw: dict[str, Any]) -> dict[str, Any]:
+    """Extract the settings Modbus does not expose from a raw ``RELOAD`` response.
+
+    ``CFG.THH`` is the thermostat hysteresis: in heating demand starts below the
+    target and stops above target + THH, in cooling it starts above the target
+    and stops below target - THH. ``DXH``/``DXC`` shift the point where the
+    second (floor or ceiling) loop switches.
+    """
+    cfg = raw.get("CFG") or {}
+    info = raw.get("INFO") or {}
+    return {
+        "hysteresis": _number(cfg.get("THH")),
+        "uptime_hours": _number(info.get("UPTIME")),
+        "thermostats": {
+            th_id: {
+                "second_loop_heating_offset": _number(therm.get("DXH")),
+                "second_loop_cooling_offset": _number(therm.get("DXC")),
+            }
+            for th_id, therm in (raw.get("DP") or {}).items()
+        },
     }
 
 

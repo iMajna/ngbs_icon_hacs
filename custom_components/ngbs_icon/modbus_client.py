@@ -99,6 +99,7 @@ def _decode_icon(
     noconn_mask = block[reg.OFF_NOCONN]
     live_mask = block[reg.OFF_LIVE]
     cond_mask = block[reg.OFF_COND]
+    tpr_mask = block[reg.OFF_TPR]
 
     thermostats: dict[str, Any] = {}
     for th in range(1, reg.MAX_THERMOSTATS + 1):
@@ -127,6 +128,7 @@ def _decode_icon(
             "demand_a": _bit(reg_a_mask, bit),
             "demand_b": _bit(reg_b_mask, bit),
             "cond": _bit(cond_mask, bit),
+            "program_active": _bit(tpr_mask, bit),
             "live": _bit(live_mask, bit),
             "cooling": system_cooling,
             "target": target,
@@ -148,6 +150,7 @@ def _decode_icon(
     return {
         "firmware": block[reg.OFF_PRGVER],
         "mixing_valve_pct": round(ao / 10.0, 1),
+        "forced_relays": block[reg.OFF_FORCED],
         "thermostats": thermostats,
         "relays": relays,
     }
@@ -288,6 +291,44 @@ class IconModbusClient:
             return None
         return list(result.registers)
 
+    async def _read_range(self, start: int, count: int) -> dict[str, int]:
+        """Read a register window and return its non-zero registers by offset."""
+        client = await self._ensure_connected()
+        values: dict[str, int] = {}
+        for address in range(start, start + count, reg.RAW_CHUNK):
+            chunk = min(reg.RAW_CHUNK, start + count - address)
+            try:
+                result = await client.read_holding_registers(
+                    address, count=chunk, device_id=self._unit
+                )
+            except ModbusException as err:
+                await self.async_close()
+                raise IconModbusConnectionError(f"Modbus read failed: {err}") from err
+            if result.isError():
+                continue
+            for index, value in enumerate(result.registers):
+                if value:
+                    values[f"0x{address - start + index:04X}"] = value
+        return values
+
+    async def async_read_raw(self, device_indices: list[int]) -> dict[str, Any]:
+        """Return the non-zero raw registers of each device, read-only."""
+        dump: dict[str, Any] = {}
+        async with self._lock:
+            try:
+                for device_index in device_indices:
+                    dump[str(device_index + 1)] = {
+                        "standard": await self._read_range(
+                            reg.device_base(device_index), reg.RAW_STANDARD_COUNT
+                        ),
+                        "extended": await self._read_range(
+                            reg.extended_base(device_index), reg.RAW_EXTENDED_COUNT
+                        ),
+                    }
+            finally:
+                await self.async_close()
+        return dump
+
     # -- discovery ------------------------------------------------------------
 
     async def async_discover(self) -> list[int]:
@@ -335,7 +376,8 @@ class IconModbusClient:
         is ``None`` only if that icon's EffOut read itself failed.
 
         Each thermostat dict additionally carries ``demand_a``, ``demand_b``,
-        ``cond`` and ``live`` bit-derived booleans alongside ``eco``.
+        ``cond``, ``program_active`` and ``live`` bit-derived booleans alongside
+        ``eco``.
 
         ``inventory`` (from the JSON setup path) is optional; besides naming
         (``thermostats``/``relays``), it may carry a cached ``device_indices``
@@ -401,6 +443,11 @@ class IconModbusClient:
                 "pump": _bit(master[reg.OFF_DI], reg.DI_PUMP_BIT),
                 "water_temp": _temp(master[reg.OFF_WATER_TEMP]),
                 "outdoor_temp": _temp(master[reg.OFF_TEX]),
+                "mixing_setpoint": _temp(master[reg.OFF_XAW]),
+                **{
+                    key: _bit(master[reg.OFF_SIGNAL], bit)
+                    for key, bit in reg.SIGNAL_BITS.items()
+                },
                 "hcmode": _hcmode(master[reg.OFF_HCMODE]),
                 "prgver": master[reg.OFF_PRGVER],
                 "supply_15v": master[reg.OFF_AI5],

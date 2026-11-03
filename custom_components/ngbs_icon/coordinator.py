@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import timedelta
 import logging
+import time
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -19,6 +20,7 @@ from .const import (
     DOMAIN,
 )
 from .modbus_client import IconModbusClient, IconModbusError
+from .names import IconJsonClient, IconJsonError, extract_settings
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -33,6 +35,13 @@ type IconConfigEntry = ConfigEntry[IconDataUpdateCoordinator]
 WRITE_SETTLE_BASE_DELAY = 1.5
 WRITE_SETTLE_PER_SLAVE_DELAY = 0.5
 
+# Settings such as the hysteresis exist only on the JSON port, where the
+# controller serves one client at a time and may be busy with the NGBS app. They
+# rarely change, so they are read at most hourly and a failure never fails a poll.
+SETTINGS_REFRESH_SECONDS = 3600
+SETTINGS_RETRY_SECONDS = 300
+JSON_TIMEOUT = 5.0
+
 
 class IconDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Poll the controller, reconnecting over Modbus for each poll."""
@@ -46,9 +55,15 @@ class IconDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Device registry ids of the iCON controllers, keyed by icon key; filled
         # in at setup so thermostat devices can reference their controller.
         self.icon_device_ids: dict[str, str] = {}
-        self.client = IconModbusClient(
-            entry.data[CONF_IP_ADDRESS], port=DEFAULT_MODBUS_PORT
+        host = entry.data[CONF_IP_ADDRESS]
+        self.client = IconModbusClient(host, port=DEFAULT_MODBUS_PORT)
+        self.json_client: IconJsonClient | None = (
+            IconJsonClient(host, self.sysid, timeout=JSON_TIMEOUT)
+            if self.sysid
+            else None
         )
+        self.settings: dict[str, Any] = {}
+        self._settings_due: float = 0.0
         scan_interval = entry.options.get(
             CONF_SCAN_INTERVAL,
             entry.data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
@@ -79,7 +94,61 @@ class IconDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.inventory["device_indices"] = sorted(
                 int(icon_key) - 1 for icon_key in data["icons"]
             )
+        await self._async_refresh_settings()
+        self._apply_settings(data)
         return data
+
+    async def _async_refresh_settings(self) -> None:
+        """Re-read the JSON-only settings when due. Best effort."""
+        now = time.monotonic()
+        if self.json_client is None or now < self._settings_due:
+            return
+        try:
+            raw = await self.json_client.async_get_settings()
+        except IconJsonError as err:
+            _LOGGER.debug("Reading iCON settings over JSON failed: %s", err)
+            self._settings_due = now + SETTINGS_RETRY_SECONDS
+            return
+        self.settings = extract_settings(raw)
+        self._settings_due = now + SETTINGS_REFRESH_SECONDS
+
+    def _apply_settings(self, data: dict[str, Any]) -> None:
+        """Merge the JSON-only settings and the off point into a poll."""
+        hysteresis = self.settings.get("hysteresis")
+        data["system"]["hysteresis"] = hysteresis
+        data["system"]["uptime_hours"] = self.settings.get("uptime_hours")
+        per_thermostat = self.settings.get("thermostats", {})
+        for icon in data["icons"].values():
+            for thermostat_id, thermostat in icon["thermostats"].items():
+                thermostat.update(per_thermostat.get(thermostat_id, {}))
+                target = thermostat["target"]
+                thermostat["demand_off_temp"] = (
+                    None
+                    if target is None or hysteresis is None
+                    else round(
+                        target - hysteresis
+                        if thermostat["cooling"]
+                        else target + hysteresis,
+                        2,
+                    )
+                )
+
+    async def async_read_raw(self) -> dict[str, Any]:
+        """Return the raw JSON and Modbus data for the diagnostics download."""
+        result: dict[str, Any] = {"json": None, "modbus": None}
+        if self.json_client is not None:
+            try:
+                result["json"] = await self.json_client.async_get_settings()
+            except IconJsonError as err:
+                result["json_error"] = str(err)
+        device_indices = self.inventory.get("device_indices") or [
+            int(icon_key) - 1 for icon_key in self.data["icons"]
+        ]
+        try:
+            result["modbus"] = await self.client.async_read_raw(device_indices)
+        except IconModbusError as err:
+            result["modbus_error"] = str(err)
+        return result
 
     def _write_settle_delay(self) -> float:
         """Scale the post-write settle delay by how many icon units are present.

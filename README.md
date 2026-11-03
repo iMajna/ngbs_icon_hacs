@@ -27,7 +27,7 @@ This integration talks to the controller primarily over **Modbus-TCP** (port 502
 ## Requirements
 
 - An NGBS iCON controller with Modbus-TCP enabled (port 502 reachable from Home Assistant).
-- Port 7992 (the legacy JSON/TCP protocol) reachable from Home Assistant during setup/reconfigure only, so the SYSID and naming inventory can be fetched automatically.
+- Port 7992 (the legacy JSON/TCP protocol) reachable from Home Assistant, so the SYSID and naming inventory can be fetched automatically during setup/reconfigure. It is also read about once an hour for the settings Modbus does not expose, such as the hysteresis; if that fails, polling carries on and those values stay unknown or unchanged.
 - A **fixed IP address** for the controller — either set directly in the iCON's own web UI, or reserved for its MAC address on your DHCP server. The integration connects to a single stored IP; if it changes, Home Assistant will lose connectivity until you run **Reconfigure** with the new address.
 
 ## Installation
@@ -72,6 +72,10 @@ One HA device per physical iCON controller that responds on the bus (model "iCON
 | Thermostat supply voltage | Sensor (mV, diagnostic) | **Master only** | Ai.6 |
 | I/O reference voltage | Sensor (mV, diagnostic) | **Master only** | Ai.7 |
 | I/O cycle counter | Sensor (diagnostic) | **Master only** | Internal regulation-loop counter, useful for confirming the controller is actively cycling |
+| Mixing valve setpoint | Sensor (°C) | **Master only** | Calculated mixing-valve setpoint (`XaW`) |
+| Thermostat hysteresis | Sensor (°C, diagnostic) | **Master only** | `CFG.THH`, read over JSON |
+| Uptime | Sensor (h, diagnostic) | **Master only** | Read over JSON. A drop means the controller restarted |
+| Problem | Binary sensor (problem, diagnostic) | **Master only** | On for overheating, frost danger or a BMS fault. Attributes list every signal flag and any relay outputs forced on |
 
 Relay outputs are read from whichever controller their terminal block physically belongs to — this is **not necessarily the same controller as the thermostats driving them**. On systems with more water circuits than rooms it's common for relays to be spread across multiple iCON controllers while all thermostats are wired to just one; each relay is still correctly attached to its own controller's device.
 
@@ -83,7 +87,7 @@ One HA device per thermostat that is live and configured (model "iCON thermostat
 
 | Entity | Platform | Notes |
 |---|---|---|
-| *(the device itself)* | Climate | Current temperature/humidity, active setpoint (4-way: heat/cool × normal/ECO, resolved by current mode+preset), ECO/Comfort preset, `hvac_action` (idle/heating/cooling). Only the **H/C-master thermostat** (`CFG.HCMASTER` from the legacy protocol) exposes heating/cooling mode switching — every other thermostat follows the system-wide mode read-only |
+| *(the device itself)* | Climate | Current temperature/humidity, active setpoint (4-way: heat/cool × normal/ECO, resolved by current mode+preset), ECO/Comfort preset, `hvac_action` (idle/heating/cooling), and the attributes `demand_off_temperature`, `second_loop_offset` and `time_program`. Only the **H/C-master thermostat** (`CFG.HCMASTER` from the legacy protocol) exposes heating/cooling mode switching — every other thermostat follows the system-wide mode read-only |
 | Temperature | Sensor (°C) | |
 | Humidity | Sensor (%) | |
 | Dewpoint temperature | Sensor (°C) | |
@@ -93,6 +97,14 @@ One HA device per thermostat that is live and configured (model "iCON thermostat
 | Condensation | Binary sensor (problem) | On when condensation risk is blocking cooling in that zone |
 | ECO | Binary sensor | Mirrors the climate entity's ECO preset as a standalone sensor |
 | Connection | Binary sensor (connectivity) | On for every thermostat present in a poll (offline thermostats are dropped from the dataset entirely rather than reported "off") |
+
+### Why a thermostat can call for heat above its setpoint
+
+The controller switches with a hysteresis, so in heating demand starts below the setpoint and stops only above setpoint + hysteresis. With a setpoint of 23.5 °C and a hysteresis of 0.5 °C, a room at 23.8 °C can be heating or idle depending on which way it came from. The `demand_off_temperature` attribute shows the point where it will stop.
+
+## Diagnostics
+
+**Download diagnostics** on the integration returns the decoded poll, the JSON-only settings, the raw JSON `RELOAD` response and every non-zero documented Modbus register, for each controller. It only reads from the controller. System IDs, keys, passwords and network identifiers are masked.
 
 ## Master detection
 
@@ -117,12 +129,12 @@ There's one deliberate exception: a write leaves its connection open on success 
 
 ## Setup protocol (legacy JSON/TCP)
 
-Modbus has no way to expose human-readable thermostat/relay names, or the controller's System ID (SYSID), so the legacy JSON/TCP protocol (port 7992) is still used for those two things — **only during config flow setup or reconfigure**, never during normal polling or control:
+Modbus has no way to expose human-readable thermostat/relay names, or the controller's System ID (SYSID), so the legacy JSON/TCP protocol (port 7992) is still used for those two things during config flow setup or reconfigure:
 
 1. **SYSID auto-discovery**: an unauthenticated `{"RELOAD": 6}` query is sent to port 7992. Unlike a normal request, this variant needs no SYSID up front and the controller replies with its `SYSID` plus per-controller firmware info — so you no longer need to look up or type in the System ID yourself.
 2. **Naming inventory**: using the discovered SYSID, a full `{"RELOAD": ""}` query is sent to fetch thermostat names, configured relay/valve names, and the H/C-master thermostat id (`CFG.HCMASTER`). These are stored in the config entry and used purely to label Modbus-driven entities.
 
-Runtime polling and all writes (setpoints, presets, HVAC mode) go over Modbus only.
+Runtime polling and all writes (setpoints, presets, HVAC mode) go over Modbus only. The one runtime use of JSON is a read-only `{"RELOAD": ""}` about once an hour, plus one when diagnostics are downloaded, for settings Modbus does not expose. It falls back to `{"RELOAD": 3}` if the first reply has no `CFG.THH`, and a failed read is retried after five minutes without affecting polling.
 
 ## Development
 
